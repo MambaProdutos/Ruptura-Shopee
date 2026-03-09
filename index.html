@@ -1,0 +1,552 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { UploadCloud, FileText, AlertCircle, CheckCircle, TrendingUp, Package, ArrowUpDown, ArrowDown, ArrowUp, AlertTriangle, Cpu } from 'lucide-react';
+
+export default function App() {
+  // Estados para o Arquivo 1 (Vendas/Estoque)
+  const [salesData, setSalesData] = useState([]);
+  const [file1Name, setFile1Name] = useState("");
+  const [error1, setError1] = useState("");
+
+  // Estados para o Arquivo 2 (Performance/Faturamento)
+  const [performanceData, setPerformanceData] = useState({});
+  const [file2Name, setFile2Name] = useState("");
+  const [error2, setError2] = useState("");
+
+  // Estados para o Arquivo 3 (Estoque FULL)
+  const [fullData, setFullData] = useState({});
+  const [file3Name, setFile3Name] = useState("");
+  const [error3, setError3] = useState("");
+
+  // Estado para a ordenação da tabela
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: null });
+  
+  // Estado para o filtro de Risco de Ruptura
+  const [showRiskFilter, setShowRiskFilter] = useState(false);
+
+  // Carregar biblioteca XLSX para suportar ficheiros Excel
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.async = true;
+    document.body.appendChild(script);
+    
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, []);
+
+  // --- Processador do Arquivo 1 (Estoque) ---
+  const parseSalesCSV = (text) => {
+    const lines = text.split('\n');
+    const result = [];
+    let isDataSection = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const row = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(item => item.replace(/(^"|"$)/g, '').trim());
+
+      if (row[0] === 'ID do Produto' && row[1] === 'Nome do Produto') {
+        isDataSection = true;
+        continue;
+      }
+
+      if (isDataSection) {
+        const idProduto = row[0];
+        if (!idProduto || idProduto === '') continue;
+
+        const nomeProduto = row[1];
+        const precoRaw = row[6] ? row[6].replace(',', '.') : "0";
+        const preco = parseFloat(precoRaw);
+        const estoque = parseInt(row[8] || 0, 10);
+
+        result.push({
+          id: idProduto,
+          nome: nomeProduto,
+          preco: isNaN(preco) ? 0 : preco,
+          estoque: isNaN(estoque) ? 0 : estoque
+        });
+      }
+    }
+    return result;
+  };
+
+  // --- Processador do Arquivo 2 (Performance/Faturamento) ---
+  const parsePerformanceCSV = (text) => {
+    const lines = text.split('\n');
+    const performanceMap = {};
+    let isDataSection = false;
+    let indexId = 0;
+    let indexFaturamento = 9;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const row = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(item => item.replace(/(^"|"$)/g, '').trim());
+
+      if (row[0] === 'ID do Item') {
+        isDataSection = true;
+        const faturamentoCol = row.findIndex(col => col.includes('Vendas (Pedido pago)'));
+        if (faturamentoCol !== -1) indexFaturamento = faturamentoCol;
+        continue;
+      }
+
+      if (isDataSection) {
+        const idProduto = row[indexId];
+        if (!idProduto || idProduto === '') continue;
+
+        const faturamentoRaw = row[indexFaturamento] || "0";
+        const faturamentoClean = faturamentoRaw.replace(/\./g, '').replace(',', '.');
+        const faturamento = parseFloat(faturamentoClean);
+
+        if (!isNaN(faturamento)) {
+          if (performanceMap[idProduto]) {
+            performanceMap[idProduto] += faturamento;
+          } else {
+            performanceMap[idProduto] = faturamento;
+          }
+        }
+      }
+    }
+    return performanceMap;
+  };
+
+  // --- Processador do Arquivo 3 (Estoque FULL) ---
+  const parseFullCSV = (text) => {
+    const lines = text.split('\n');
+    const fullMap = {};
+    let isDataSection = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const row = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(item => item.replace(/(^"|"$)/g, '').trim());
+
+      if (row[0] === 'Product Name' || row[0] === 'ID do Item' || row[0].includes('ID')) {
+        isDataSection = true;
+        continue;
+      }
+
+      if (!isDataSection && !isNaN(parseInt(row[11]))) {
+        isDataSection = true;
+      }
+
+      if (isDataSection) {
+        let idProduto = row[0];
+        
+        if (idProduto && isNaN(idProduto.charAt(0)) && row[5] && row[5].includes('_')) {
+          idProduto = row[5];
+        }
+
+        if (!idProduto || idProduto === '') continue;
+
+        const cleanId = idProduto.split('_')[0];
+        const estoqueFullRaw = row[11] || "0";
+        const estoqueFull = parseInt(estoqueFullRaw, 10);
+
+        if (!isNaN(estoqueFull)) {
+          if (fullMap[cleanId]) {
+            fullMap[cleanId] += estoqueFull;
+          } else {
+            fullMap[cleanId] = estoqueFull;
+          }
+        }
+      }
+    }
+    return fullMap;
+  };
+
+  // --- Função Geral de Upload ---
+  const handleFileUpload = (event, fileType) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+    const reader = new FileReader();
+
+    if (fileType === 1) { setFile1Name(file.name); setError1(""); } 
+    else if (fileType === 2) { setFile2Name(file.name); setError2(""); }
+    else { setFile3Name(file.name); setError3(""); }
+
+    reader.onload = (e) => {
+      try {
+        let text = "";
+        
+        if (isExcel) {
+          if (!window.XLSX) {
+            const msg = "A biblioteca de Excel ainda está a carregar. Tente em 2 segundos.";
+            if (fileType === 1) setError1(msg);
+            else if (fileType === 2) setError2(msg);
+            else setError3(msg);
+            return;
+          }
+          const data = new Uint8Array(e.target.result);
+          const workbook = window.XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          text = window.XLSX.utils.sheet_to_csv(worksheet);
+        } else {
+          text = e.target.result;
+        }
+
+        if (fileType === 1) {
+          const parsedData = parseSalesCSV(text);
+          if (parsedData.length === 0) setError1("Não foi possível encontrar produtos na Planilha 1.");
+          else setSalesData(parsedData);
+        } else if (fileType === 2) {
+          const parsedData = parsePerformanceCSV(text);
+          if (Object.keys(parsedData).length === 0) setError2("Não foi possível encontrar faturamento na Planilha 2.");
+          else setPerformanceData(parsedData);
+        } else {
+          const parsedData = parseFullCSV(text);
+          if (Object.keys(parsedData).length === 0) setError3("Não foi possível encontrar estoque na Planilha do FULL.");
+          else setFullData(parsedData);
+        }
+      } catch (err) {
+        const msg = "Erro ao processar o arquivo. Verifique se é a planilha correta.";
+        if (fileType === 1) setError1(msg);
+        else if (fileType === 2) setError2(msg);
+        else setError3(msg);
+        console.error(err);
+      }
+    };
+    
+    if (isExcel) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file);
+    }
+  };
+
+  // --- Lógica de Ordenação ---
+  const requestSort = (key) => {
+    let direction = 'desc'; 
+    if (sortConfig.key === key && sortConfig.direction === 'desc') {
+      direction = 'asc'; 
+    } else if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = null; 
+      key = null;
+    }
+    setSortConfig({ key, direction });
+  };
+
+  // --- Cruzamento e Ordenação de Dados (Merge + Sort) ---
+  const sortedAndCombinedData = useMemo(() => {
+    let combined = salesData.map(item => {
+      const faturamento = performanceData[item.id] || 0;
+      const estoqueFull = fullData[item.id] || 0;
+      const estoqueTotal = item.estoque + estoqueFull;
+      
+      return {
+        ...item,
+        faturamento30d: faturamento,
+        estoqueFull: estoqueFull,
+        estoqueTotal: estoqueTotal
+      };
+    });
+
+    if (showRiskFilter) {
+      combined = combined.filter(item => item.estoque < 10);
+    }
+
+    if (sortConfig.key !== null) {
+      combined.sort((a, b) => {
+        if (a[sortConfig.key] < b[sortConfig.key]) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
+        }
+        if (a[sortConfig.key] > b[sortConfig.key]) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    } else {
+      combined.sort((a, b) => b.faturamento30d - a.faturamento30d);
+    }
+
+    return combined;
+  }, [salesData, performanceData, fullData, sortConfig, showRiskFilter]);
+
+  // Componente auxiliar para os cabeçalhos ordenáveis
+  const SortableHeader = ({ label, sortKey, align = 'left', className = '' }) => {
+    const isActive = sortConfig.key === sortKey;
+    return (
+      <th 
+        className={`px-4 py-4 cursor-pointer select-none transition-colors border-b border-white/10 hover:bg-white/5 ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'} ${className}`}
+        onClick={() => requestSort(sortKey)}
+        title="Clique para ordenar"
+      >
+        <div className={`flex items-center justify-${align === 'right' ? 'end' : align === 'center' ? 'center' : 'start'} gap-1.5`}>
+          <span className="text-[#9ca3af] font-semibold text-xs tracking-wider uppercase font-inter">{label}</span>
+          {isActive ? (
+            sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 text-[#2563eb]" /> : <ArrowDown className="w-3 h-3 text-[#2563eb]" />
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-white/20 opacity-0 group-hover:opacity-100 transition-opacity" />
+          )}
+        </div>
+      </th>
+    );
+  };
+
+  return (
+    <>
+      <style dangerouslySetInnerHTML={{__html: `
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Montserrat:wght@700;900&display=swap');
+        
+        .font-inter { font-family: 'Inter', sans-serif; }
+        .font-montserrat { font-family: 'Montserrat', sans-serif; }
+        
+        .bg-mamba-dark { background-color: #050505; }
+        
+        .grid-overlay {
+          background-image: 
+            linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+          background-size: 30px 30px;
+        }
+        
+        .glass-panel {
+          background: rgba(17, 17, 17, 0.78);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .neon-text-gradient {
+          background: linear-gradient(to right, #2563eb, #7c3aed);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar {
+          height: 8px;
+          width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: rgba(255,255,255,0.02);
+          border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(255,255,255,0.1);
+          border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(255,255,255,0.2);
+        }
+      `}} />
+
+      <div className="min-h-screen bg-mamba-dark relative text-white font-inter selection:bg-[#7c3aed]/30 selection:text-white">
+        <div className="absolute inset-0 grid-overlay pointer-events-none"></div>
+        
+        <div className="relative z-10 max-w-7xl mx-auto p-6 space-y-8">
+          
+          {/* Cabeçalho */}
+          <header className="glass-panel p-8 rounded-2xl shadow-[0_0_40px_rgba(37,99,235,0.05)] text-center md:text-left flex flex-col md:flex-row items-center justify-between gap-6">
+            <div>
+              <div className="flex items-center gap-3 mb-2 justify-center md:justify-start">
+                <Cpu className="w-8 h-8 text-[#2563eb]" />
+                <h1 className="text-3xl md:text-4xl font-black font-montserrat tracking-tight uppercase neon-text-gradient drop-shadow-sm">
+                  Ruptura Shopee
+                </h1>
+              </div>
+              <p className="text-[#9ca3af] font-light text-sm md:text-base max-w-2xl">
+                Motor de inteligência para cruzar estoque e performance. Identifique perdas financeiras instantaneamente.
+              </p>
+            </div>
+            <div className="flex items-center gap-4 bg-white/5 px-5 py-3 rounded-xl border border-white/10">
+              <div className="text-right">
+                <p className="text-[10px] text-[#9ca3af] uppercase tracking-wider font-bold mb-1">Status do Sistema</p>
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-[#2563eb] animate-pulse"></span>
+                  <span className="text-xs font-semibold text-white tracking-wide">ONLINE & READY</span>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            {/* Card Upload 1 - Vendas/Estoque */}
+            <section className="glass-panel p-6 rounded-2xl flex flex-col group transition-all duration-300 hover:shadow-[0_0_30px_rgba(37,99,235,0.1)] hover:border-[#2563eb]/30">
+              <h2 className="text-base font-bold font-montserrat flex items-center gap-3 mb-4 text-white">
+                <span className="bg-[#2563eb] text-white w-7 h-7 rounded-lg flex items-center justify-center text-xs shadow-[0_0_15px_rgba(37,99,235,0.4)]">1</span>
+                Estoque Loja
+              </h2>
+              
+              <div className="bg-white/5 border border-white/5 rounded-xl p-3 mb-5 text-[11px] text-[#9ca3af] flex-grow">
+                <span className="text-white font-semibold">Path:</span> Produto &rarr; Ações em massa &rarr; Info de Vendas
+              </div>
+
+              <label className="flex flex-col items-center justify-center w-full h-32 border border-white/10 border-dashed rounded-xl cursor-pointer bg-black/20 hover:bg-[#2563eb]/5 hover:border-[#2563eb]/50 transition-all group-hover:bg-white/5">
+                <div className="flex flex-col items-center justify-center pt-3 pb-3">
+                  <UploadCloud className="w-7 h-7 mb-2 text-[#2563eb]/70 group-hover:text-[#2563eb] transition-colors" />
+                  <p className="text-sm text-white font-semibold">Drop CSV/XLSX</p>
+                </div>
+                <input type="file" className="hidden" accept=".csv, .xlsx, .xls" onChange={(e) => handleFileUpload(e, 1)} />
+              </label>
+
+              {error1 && <p className="mt-3 text-[#ff4d8d] text-xs font-medium bg-[#ff4d8d]/10 p-2 rounded-lg border border-[#ff4d8d]/20">{error1}</p>}
+              {file1Name && !error1 && (
+                <div className="mt-4 flex items-center gap-2 text-[#2563eb] bg-[#2563eb]/10 p-2.5 rounded-xl border border-[#2563eb]/20 text-xs font-semibold">
+                  <CheckCircle className="w-4 h-4 shrink-0" /> <span className="truncate text-white">{file1Name}</span>
+                </div>
+              )}
+            </section>
+
+            {/* Card Upload 2 - Performance */}
+            <section className="glass-panel p-6 rounded-2xl flex flex-col group transition-all duration-300 hover:shadow-[0_0_30px_rgba(124,58,237,0.1)] hover:border-[#7c3aed]/30">
+              <h2 className="text-base font-bold font-montserrat flex items-center gap-3 mb-4 text-white">
+                <span className="bg-[#7c3aed] text-white w-7 h-7 rounded-lg flex items-center justify-center text-xs shadow-[0_0_15px_rgba(124,58,237,0.4)]">2</span>
+                Faturamento
+              </h2>
+              
+              <div className="bg-white/5 border border-white/5 rounded-xl p-3 mb-5 text-[11px] text-[#9ca3af] flex-grow">
+                <span className="text-white font-semibold">Path:</span> Info. Gerenciais &rarr; Produto &rarr; Performance
+              </div>
+
+              <label className="flex flex-col items-center justify-center w-full h-32 border border-white/10 border-dashed rounded-xl cursor-pointer bg-black/20 hover:bg-[#7c3aed]/5 hover:border-[#7c3aed]/50 transition-all group-hover:bg-white/5">
+                <div className="flex flex-col items-center justify-center pt-3 pb-3">
+                  <TrendingUp className="w-7 h-7 mb-2 text-[#7c3aed]/70 group-hover:text-[#7c3aed] transition-colors" />
+                  <p className="text-sm text-white font-semibold">Drop CSV/XLSX</p>
+                </div>
+                <input type="file" className="hidden" accept=".csv, .xlsx, .xls" onChange={(e) => handleFileUpload(e, 2)} />
+              </label>
+
+              {error2 && <p className="mt-3 text-[#ff4d8d] text-xs font-medium bg-[#ff4d8d]/10 p-2 rounded-lg border border-[#ff4d8d]/20">{error2}</p>}
+              {file2Name && !error2 && (
+                <div className="mt-4 flex items-center gap-2 text-[#7c3aed] bg-[#7c3aed]/10 p-2.5 rounded-xl border border-[#7c3aed]/20 text-xs font-semibold">
+                  <CheckCircle className="w-4 h-4 shrink-0" /> <span className="truncate text-white">{file2Name}</span>
+                </div>
+              )}
+            </section>
+
+            {/* Card Upload 3 - Estoque FULL */}
+            <section className="glass-panel p-6 rounded-2xl flex flex-col group transition-all duration-300 hover:shadow-[0_0_30px_rgba(255,255,255,0.05)] hover:border-white/30">
+              <h2 className="text-base font-bold font-montserrat flex items-center gap-3 mb-4 text-white">
+                <span className="bg-white/10 text-white w-7 h-7 rounded-lg flex items-center justify-center text-xs border border-white/20">3</span>
+                Estoque FULL <span className="text-[10px] font-inter font-normal text-[#9ca3af] px-2 py-0.5 bg-white/5 rounded ml-1 border border-white/5">OPTIONAL</span>
+              </h2>
+              
+              <div className="bg-white/5 border border-white/5 rounded-xl p-3 mb-5 text-[11px] text-[#9ca3af] flex-grow">
+                <span className="text-white font-semibold">Path:</span> Menu FULL &rarr; Inventário &rarr; Exportar
+              </div>
+
+              <label className="flex flex-col items-center justify-center w-full h-32 border border-white/10 border-dashed rounded-xl cursor-pointer bg-black/20 hover:bg-white/5 hover:border-white/50 transition-all group-hover:bg-white/5">
+                <div className="flex flex-col items-center justify-center pt-3 pb-3">
+                  <Package className="w-7 h-7 mb-2 text-white/40 group-hover:text-white transition-colors" />
+                  <p className="text-sm text-white font-semibold">Drop CSV/XLSX</p>
+                </div>
+                <input type="file" className="hidden" accept=".csv, .xlsx, .xls" onChange={(e) => handleFileUpload(e, 3)} />
+              </label>
+
+              {error3 && <p className="mt-3 text-[#ff4d8d] text-xs font-medium bg-[#ff4d8d]/10 p-2 rounded-lg border border-[#ff4d8d]/20">{error3}</p>}
+              {file3Name && !error3 && (
+                <div className="mt-4 flex items-center gap-2 text-white bg-white/10 p-2.5 rounded-xl border border-white/20 text-xs font-semibold">
+                  <CheckCircle className="w-4 h-4 shrink-0" /> <span className="truncate text-white">{file3Name}</span>
+                </div>
+              )}
+            </section>
+
+          </div>
+
+          {/* Pré-visualização dos dados cruzados */}
+          {sortedAndCombinedData.length > 0 && (
+            <section className="glass-panel rounded-2xl overflow-hidden shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex flex-col">
+              
+              {/* Header da Tabela */}
+              <div className="p-6 border-b border-white/10 bg-black/40 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                  <h2 className="text-lg font-bold font-montserrat flex items-center gap-2 text-white">
+                    <FileText className="w-5 h-5 text-[#2563eb]" />
+                    Data Console
+                  </h2>
+                  <p className="text-xs text-[#9ca3af] mt-1 font-medium tracking-wide">
+                    Processando <span className="text-white">{sortedAndCombinedData.length}</span> registros.
+                  </p>
+                </div>
+                
+                <button
+                  onClick={() => setShowRiskFilter(!showRiskFilter)}
+                  className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold font-montserrat tracking-widest transition-all duration-300 ${
+                    showRiskFilter 
+                      ? 'bg-[#ff4d8d]/20 text-[#ff4d8d] border border-[#ff4d8d] shadow-[0_0_20px_rgba(255,77,141,0.3)]' 
+                      : 'bg-white/5 text-[#9ca3af] border border-white/10 hover:text-white hover:border-white/30 hover:bg-white/10'
+                  }`}
+                >
+                  <AlertTriangle className={`w-4 h-4 ${showRiskFilter ? 'animate-pulse' : ''}`} />
+                  RISCO DE RUPTURA
+                </button>
+              </div>
+              
+              <div className="overflow-x-auto custom-scrollbar">
+                <table className="w-full text-sm text-left whitespace-nowrap">
+                  <thead className="bg-black/60 group sticky top-0 backdrop-blur-md z-10">
+                    <tr>
+                      <th className="px-4 py-4 text-[#9ca3af] font-semibold text-xs tracking-wider uppercase border-b border-white/10">ID System</th>
+                      <th className="px-4 py-4 text-[#9ca3af] font-semibold text-xs tracking-wider uppercase border-b border-white/10">Produto</th>
+                      <SortableHeader label="Preço" sortKey="preco" align="right" />
+                      <SortableHeader label="Stock Local" sortKey="estoque" align="center" />
+                      <SortableHeader label="Stock FULL" sortKey="estoqueFull" align="center" className="text-white/60" />
+                      <SortableHeader label="Total Stock" sortKey="estoqueTotal" align="center" className="bg-[#2563eb]/5" />
+                      <SortableHeader label="Receita (30D)" sortKey="faturamento30d" align="right" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {sortedAndCombinedData.map((item, idx) => {
+                      const isRuptura = item.estoqueTotal <= 0;
+                      return (
+                        <tr 
+                          key={idx} 
+                          className={`transition-colors duration-150 ${
+                            isRuptura 
+                              ? 'bg-[#ff4d8d]/5 hover:bg-[#ff4d8d]/10 border-l-2 border-l-[#ff4d8d]' 
+                              : 'hover:bg-white/5 border-l-2 border-l-transparent'
+                          }`}
+                        >
+                          <td className="px-4 py-3.5 font-mono text-[11px] text-[#9ca3af]">{item.id}</td>
+                          <td className="px-4 py-3.5 max-w-[200px] sm:max-w-xs md:max-w-sm truncate font-medium text-white" title={item.nome}>
+                            {item.nome}
+                          </td>
+                          
+                          <td className="px-4 py-3.5 text-right font-mono text-xs text-[#9ca3af]">
+                            {item.preco > 0 ? `R$ ${item.preco.toFixed(2).replace('.', ',')}` : '-'}
+                          </td>
+
+                          <td className="px-4 py-3.5 text-center text-white font-medium">
+                            {item.estoque}
+                          </td>
+                          
+                          <td className="px-4 py-3.5 text-center text-white/50 font-medium">
+                            {file3Name ? item.estoqueFull : '-'}
+                          </td>
+                          
+                          <td className="px-4 py-3.5 text-center bg-[#2563eb]/5">
+                            <span className={`px-3 py-1.5 rounded-md text-xs font-bold tracking-wider inline-block min-w-[3rem] ${
+                              isRuptura 
+                                ? 'bg-[#ff4d8d]/20 text-[#ff4d8d] border border-[#ff4d8d]/30 shadow-[0_0_10px_rgba(255,77,141,0.2)]' 
+                                : 'bg-[#10b981]/10 text-[#10b981] border border-[#10b981]/20'
+                            }`}>
+                              {item.estoqueTotal}
+                            </span>
+                          </td>
+                          
+                          <td className="px-4 py-3.5 text-right font-bold text-[#7c3aed] font-mono tracking-tight">
+                            {item.faturamento30d > 0 ? `R$ ${item.faturamento30d.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+        </div>
+      </div>
+    </>
+  );
+}
